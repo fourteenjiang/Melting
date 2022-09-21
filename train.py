@@ -1,10 +1,8 @@
-
-from __future__ import print_function, division
-
+from __future__ import print_function
+from __future__ import division
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim import lr_scheduler
 import numpy as np
 import torchvision
 from torchvision import datasets, models, transforms
@@ -12,104 +10,29 @@ import matplotlib.pyplot as plt
 import time
 import os
 import copy
-import shutil
 
-data_dir = 'melting'
-# from[resnet, alexnet, vgg, squeezenet, densenet, inception]to choose model
-model_name = "squeezenet"
+
+data_dir = "melting"
+# from[resnet, alexnet, inception]pick one pre-trained model
+model_name = "resnet"
 num_classes = 2
-batch_size = 8
-num_epochs = 25
-historgy={}
-# for feature extractor, if ==False fine-tunning data
-feature_extract = True
-PATH="conv-model.pth"
-plt.ion()   # interactive mode
-os.environ['KMP_DUPLICATE_LIB_OK']='True'
+batch_size = 4
+num_epochs = 30
+feature_extract = True #false== fine tuning
+path_name=model_name+''+('FE' if feature_extract else 'FT')
+PATH='{}.pth'.format(path_name)
 
-######################################################################
-# Load Data
-
-
-data_transforms = {
-    'train': transforms.Compose([
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ]),
-    'val': transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ]),
-}
-
-image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
-                                          data_transforms[x])
-                  for x in ['train', 'val']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=4,
-                                             shuffle=True)#, num_workers=4 is omitted
-              for x in ['train', 'val']}
-dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
-class_names = image_datasets['train'].classes
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-######################################################################
-# Visualize a few images
-
-
-def imshow(inp, title=None):
-    """Imshow for Tensor."""
-    inp = inp.numpy().transpose((1, 2, 0))
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    inp = std * inp + mean
-    inp = np.clip(inp, 0, 1)
-    plt.imshow(inp)
-    if title is not None:
-        plt.title(title)
-    plt.pause(0.001)  # pause a bit so that plots are updated
-
-
-# Get a batch of training data
-inputs, classes = next(iter(dataloaders['train']))
-
-# Make a grid from batch
-out = torchvision.utils.make_grid(inputs)
-
-imshow(out, title=[class_names[x] for x in classes])
-
-
-
-######################################################################
-# Training the model
-# ------------------
-#
-# Now, let's write a general function to train a model. Here, we will
-# illustrate:
-#
-# -  Scheduling the learning rate
-# -  Saving the best model
-#
-# In the following, parameter ``scheduler`` is an LR scheduler object from
-# ``torch.optim.lr_scheduler``.
-
-
-def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
-    global history
+def train_model(model, dataloaders, criterion, optimizer, num_epochs, is_inception=False):
     since = time.time()
 
+    val_acc_history = []
+    history= {} # acc and loss history for both train and valid 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
-
     history = {
         'train': {'loss': [], 'acc': []},
         'val': {'loss': [], 'acc': []}
     }
-
 
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
@@ -118,7 +41,6 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
-                scheduler.step()
                 model.train()  # Set model to training mode
             else:
                 model.eval()   # Set model to evaluate mode
@@ -137,9 +59,21 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs)
+                    # Get model outputs and calculate loss
+                    # Special case for inception because in training it has an auxiliary output. In train
+                    #   mode we calculate the loss by summing the final output and the auxiliary output
+                    #   but in testing we only consider the final output.
+                    if is_inception and phase == 'train':
+                        # From https://discuss.pytorch.org/t/how-to-optimize-inception-model-with-auxiliary-classifiers/7958
+                        outputs, aux_outputs = model(inputs)
+                        loss1 = criterion(outputs, labels)
+                        loss2 = criterion(aux_outputs, labels)
+                        loss = loss1 + 0.4*loss2
+                    else:
+                        outputs = model(inputs)
+                        loss = criterion(outputs, labels)
+
                     _, preds = torch.max(outputs, 1)
-                    loss = criterion(outputs, labels)
 
                     # backward + optimize only if in training phase
                     if phase == 'train':
@@ -150,42 +84,162 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
 
-            epoch_loss = running_loss / dataset_sizes[phase]
-            epoch_acc = running_corrects.double() / dataset_sizes[phase]
+            epoch_loss = running_loss / len(dataloaders[phase].dataset)
+            epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset)
 
-            print('{} Loss: {:.4f} Acc: {:.4f}'.format(
-                phase, epoch_loss, epoch_acc))
-
+            print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+            
             history[phase]['loss'].append(epoch_loss)
             history[phase]['acc'].append(epoch_acc)
+
 
             # deep copy the model
             if phase == 'val' and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
-
+            if phase == 'val':
+                val_acc_history.append(epoch_acc)
 
         print()
 
     time_elapsed = time.time() - since
-    print('Training complete in {:.0f}m {:.0f}s'.format(
-        time_elapsed // 60, time_elapsed % 60))
+    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Best val Acc: {:4f}'.format(best_acc))
 
     # load best model weights
     model.load_state_dict(best_model_wts)
+    return model, val_acc_history, history
+
+def set_parameter_requires_grad(model, feature_extracting):
+    if feature_extracting:
+        for param in model.parameters():
+            param.requires_grad = False
+
+def initialize_model(model_name, num_classes, feature_extract, use_pretrained=True):
+
+    model_ft = None
+    input_size = 0
+
+    if model_name == "resnet":
+        """ Resnet18
+ """
+        model_ft = models.resnet18(pretrained=use_pretrained)
+        set_parameter_requires_grad(model_ft, feature_extract)
+        num_ftrs = model_ft.fc.in_features
+        model_ft.fc = nn.Linear(num_ftrs, num_classes)
+        input_size = 224
+
+    elif model_name == "alexnet":
+        """ Alexnet
+ """
+        model_ft = models.alexnet(pretrained=use_pretrained)
+        set_parameter_requires_grad(model_ft, feature_extract)
+        num_ftrs = model_ft.classifier[6].in_features
+        model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
+        input_size = 224
+
+ #    elif model_name == "vgg":
+ #        """ VGG11_bn
+ # """
+ #        model_ft = models.vgg11_bn(pretrained=use_pretrained)
+ #        set_parameter_requires_grad(model_ft, feature_extract)
+ #        num_ftrs = model_ft.classifier[6].in_features
+ #        model_ft.classifier[6] = nn.Linear(num_ftrs,num_classes)
+ #        input_size = 224
+ #
+ #    elif model_name == "squeezenet":
+ #        """ Squeezenet
+ # """
+ #        model_ft = models.squeezenet1_0(pretrained=use_pretrained)
+ #        set_parameter_requires_grad(model_ft, feature_extract)
+ #        model_ft.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
+ #        model_ft.num_classes = num_classes
+ #        input_size = 224
+ #
+ #    elif model_name == "densenet":
+ #        """ Densenet
+ # """
+ #        model_ft = models.densenet121(pretrained=use_pretrained)
+ #        set_parameter_requires_grad(model_ft, feature_extract)
+ #        num_ftrs = model_ft.classifier.in_features
+ #        model_ft.classifier = nn.Linear(num_ftrs, num_classes)
+ #        input_size = 224
+
+    elif model_name == "inception":
+        """ Inception v3
+ Be careful, expects (299,299) sized images and has auxiliary output
+ """
+        model_ft = models.inception_v3(pretrained=use_pretrained)
+        set_parameter_requires_grad(model_ft, feature_extract)
+        num_ftrs = model_ft.AuxLogits.fc.in_features
+        model_ft.AuxLogits.fc = nn.Linear(num_ftrs, num_classes)
+        num_ftrs = model_ft.fc.in_features
+        model_ft.fc = nn.Linear(num_ftrs,num_classes)
+        input_size = 299
+
+    else:
+        print("Invalid model name, exiting...")
+        exit()
+
+    return model_ft, input_size
+
+def data_load():
+    global data_transforms,dataloaders_dict,image_datasets
+    # Data augmentation and normalization for training
+    data_transforms = {
+        'train': transforms.Compose([
+            transforms.RandomResizedCrop(input_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ]),
+        'val': transforms.Compose([
+            transforms.Resize(input_size),
+            transforms.CenterCrop(input_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ]),
+    }
+
+    print("Initializing Datasets and Dataloaders...")
+    # Create training and validation datasets
+    image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms[x]) for x in ['train', 'val']}
+    # Create training and validation dataloaders
+    dataloaders_dict = {
+        x: torch.utils.data.DataLoader(image_datasets[x], batch_size=batch_size, shuffle=True, num_workers=4) for x in
+        ['train', 'val']}
+
+
+def scratch_train():
+    # Initialize the non-pretrained version of the model used for this run
+    scratch_model, _ = initialize_model(model_name, num_classes, feature_extract=False, use_pretrained=False)
+    scratch_model = scratch_model.to(device)
+    scratch_optimizer = optim.SGD(scratch_model.parameters(), lr=0.001, momentum=0.9)
+    scratch_criterion = nn.CrossEntropyLoss()
+    _, scratch_hist = train_model(scratch_model, dataloaders_dict, scratch_criterion, scratch_optimizer,
+                                  num_epochs=num_epochs, is_inception=(model_name == "inception"))
+
+    # Plot the training curves of validation accuracy vs. number
+    #  of training epochs for the transfer learning method and
+    #  the model trained from scratch
+    ohist = []
+    shist = []
+
+    ohist = [h.cpu().numpy() for h in hist]
+    shist = [h.cpu().numpy() for h in scratch_hist]
+
+    plt.title("Validation Accuracy vs. Number of Training Epochs")
+    plt.xlabel("Training Epochs")
+    plt.ylabel("Validation Accuracy")
+    plt.plot(range(1, num_epochs + 1), ohist, label="Pretrained val_acc")
+    plt.plot(range(1, num_epochs + 1), shist, label="Scratch acc")
+    plt.ylim((0, 1.))
+    plt.xticks(np.arange(1, num_epochs + 1, 1.0))
+    plt.legend()
+    plt.show()
 
 
 
-
-    return model
-
-######################################################################
-# Visualizing the model predictions
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#
-# Generic function to display predictions for a few images
-#
 def plot_history(history):
     """Plot historical training and validation accuracies and losses
 
@@ -210,131 +264,57 @@ def plot_history(history):
     ax1.legend(['Training Loss', 'Validation Loss'], bbox_to_anchor=(0.6, 0.2))
 
     # Plot accuracies
-    ax2 = ax1.twinx()
-    ax2.plot(epochs, history['train']['acc'], 'y-')
-    ax2.plot(epochs, history['val']['acc'], 'r-')
-    ax2.set_ylabel('Accuracy')
-    ax2.legend(['Training Accuracy', 'Validation Accuracy'], bbox_to_anchor=(0.6, 0.9))
+    # ax2 = ax1.twinx()
+    # ax2.plot(epochs, history['train']['acc'], 'y-')
+    # ax2.plot(epochs, history['val']['acc'], 'r-')
+    # ax2.set_ylabel('Accuracy')
+    # ax2.legend(['Training Accuracy', 'Validation Accuracy'], bbox_to_anchor=(0.6, 0.8))
 
-    plt.legend(frameon=False)
+    # plt.legend(frameon=False)
     plt.show()
 
-def visualize_model(model, num_images=6):
-    was_training = model.training
-    model.eval()
-    images_so_far = 0
-    fig = plt.figure()
+#Initialize model
+model_ft, input_size = initialize_model(model_name, num_classes, feature_extract, use_pretrained=True)
+print(model_ft)
+data_load()
 
-    with torch.no_grad():
-        for i, (inputs, labels) in enumerate(dataloaders['val']):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+# Detect if we have a GPU available
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print('CPU processing'if torch.cuda.is_available() else 'GPU processing')
 
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
+#### Create the Optimizer
+# Send the model to GPU
+model_ft = model_ft.to(device)
 
-            for j in range(inputs.size()[0]):
-                images_so_far += 1
-                ax = plt.subplot(num_images//2, 2, images_so_far)
-                ax.axis('off')
-                ax.set_title('predicted: {}'.format(class_names[preds[j]]))
-                imshow(inputs.cpu().data[j])
-
-                if images_so_far == num_images:
-                    model.train(mode=was_training)
-                    return
-        model.train(mode=was_training)
-
-######################################################################
-# Finetuning the convnet
-# ----------------------
-#
-# Load a pretrained model and reset final fully connected layer.
-#
-
-# model_ft = models.resnet18(pretrained=True)
-# num_ftrs = model_ft.fc.in_features
-# model_ft.fc = nn.Linear(num_ftrs, 2)
-#
-# model_ft = model_ft.to(device)
-#
-# criterion = nn.CrossEntropyLoss()
+# Gather the parameters to be optimized/updated in this run. If we are
+#  finetuning we will be updating all parameters. However, if we are
+#  doing feature extract method, we will only update the parameters
+#  that we have just initialized, i.e. the parameters with requires_grad
+#  is True.
+params_to_update = model_ft.parameters()
+print("Params to learn:")
+if feature_extract:
+    params_to_update = []
+    for name,param in model_ft.named_parameters():
+        if param.requires_grad == True:
+            params_to_update.append(param)
+            print("\t",name)
+else:
+    for name,param in model_ft.named_parameters():
+        if param.requires_grad == True:
+            print("\t",name)
 
 # Observe that all parameters are being optimized
-# optimizer_ft = optim.SGD(model_ft.parameters(), lr=0.001, momentum=0.9)
-#
-# # Decay LR by a factor of 0.1 every 7 epochs
-# exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+optimizer_ft = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
 
-######################################################################
-# Train and evaluate
-# ^^^^^^^^^^^^^^^^^^
-#
-# It should take around 15-25 min on CPU. On GPU though, it takes less than a
-# minute.
-#
-# model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler,
-#                        num_epochs=25)
-
-######################################################################
-#
-
-# visualize_model(model_ft)
-
-
-######################################################################
-# ConvNet as fixed feature extractor
-# ----------------------------------
-#
-# Here, we need to freeze all the network except the final layer. We need
-# to set ``requires_grad == False`` to freeze the parameters so that the
-# gradients are not computed in ``backward()``.
-#
-# You can read more about this in the documentation
-# `here <http://pytorch.org/docs/notes/autograd.html#excluding-subgraphs-from-backward>`__.
-#
-
-model_conv = torchvision.models.resnet18(pretrained=True)
-for param in model_conv.parameters():
-    param.requires_grad = False
-
-# Parameters of newly constructed modules have requires_grad=True by default
-num_ftrs = model_conv.fc.in_features
-model_conv.fc = nn.Linear(num_ftrs, 2)
-
-model_conv = model_conv.to(device)
-
+###Run Training and Validation Step
+# Setup the loss fxn
 criterion = nn.CrossEntropyLoss()
 
-# Observe that only parameters of final layer are being optimized as
-# opoosed to before.
-optimizer_conv = optim.SGD(model_conv.fc.parameters(), lr=0.001, momentum=0.9)
-
-# Decay LR by a factor of 0.1 every 7 epochs
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_conv, step_size=7, gamma=0.1)
-
-
-######################################################################
 # Train and evaluate
-# ^^^^^^^^^^^^^^^^^^
-#
-# On CPU this will take about half the time compared to previous scenario.
-# This is expected as gradients don't need to be computed for most of the
-# network. However, forward does need to be computed.
-#
+model_ft, hist,h = train_model(model_ft, dataloaders_dict, criterion, optimizer_ft, num_epochs=num_epochs, is_inception=(model_name=="inception"))
+torch.save(model_ft, PATH)
+print("\nBest model saved...")
+# scratch_train()
+plot_history(h)
 
-model_conv = train_model(model_conv, criterion, optimizer_conv,
-                         exp_lr_scheduler, num_epochs=25)
-
-
-######################################################################
-#
-
-print("\nSaving the model...")
-torch.save(model_conv, PATH)
-
-visualize_model(model_conv)
-plot_history(history)
-
-plt.ioff()
-plt.show()
